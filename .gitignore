@@ -1,0 +1,19 @@
+# Results & logs (large, run-specific)
+faircv_results_*.csv
+logs/
+
+# Conda installer
+Miniconda3-*.sh
+
+# Model-specific run scripts (not needed for basic replication)
+run_faircv_12b.sh
+run_faircv_e4b.sh
+run_faircv_mistral7b.sh
+run_faircv_qwen14b.sh
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Editor
+.vscode/
