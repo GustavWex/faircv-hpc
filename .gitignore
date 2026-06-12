@@ -1,4 +1,4 @@
-# Results & logs (large, run-specific)
+# Raw timestamped results in root (use results/ folder instead)
 faircv_results_*.csv
 logs/
 
