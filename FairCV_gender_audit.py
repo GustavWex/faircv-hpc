@@ -67,6 +67,8 @@ _p.add_argument("--load-csv",    action="store_true",      help="Load faircv_res
 _p.add_argument("--seed",        type=int,  default=0)
 _p.add_argument("--model",       type=str,  default="google/gemma-4-26B-A4B-it",
                 help="HuggingFace model ID to use for scoring")
+_p.add_argument("--no-thinking", action="store_true",
+                help="Disable thinking/reasoning mode (Qwen3, Fanar-2)")
 _args, _ = _p.parse_known_args()   # parse_known_args lets Jupyter pass extra args safely
 
 SAMPLE_SIZE   = _args.sample_size
@@ -76,6 +78,7 @@ USE_4BIT      = not _args.no_4bit
 BATCH_SIZE    = _args.batch_size
 MODEL         = _args.model
 SEED          = _args.seed
+NO_THINKING   = _args.no_thinking
 
 rng      = np.random.default_rng(SEED)   # used when drawing names
 rng_mock = np.random.default_rng(SEED)   # used only by the fake scorer
@@ -99,7 +102,7 @@ rng_mock = np.random.default_rng(SEED)   # used only by the fake scorer
 
 if not USE_MOCK:
     import torch
-    from transformers import pipeline, BitsAndBytesConfig
+    from transformers import pipeline, BitsAndBytesConfig, AutoTokenizer
 
     _quant = (
         BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16)
@@ -107,14 +110,36 @@ if not USE_MOCK:
     )
     _load_kw = {"quantization_config": _quant} if _quant else {"torch_dtype": torch.bfloat16}
 
+    # Load tokenizer separately — some models (e.g. ALLaM) have SentencePiece
+    # tokenizers that the fast tiktoken-based loader misidentifies; fall back to slow.
+    print(f"Loading tokenizer for {MODEL} …")
+    try:
+        _tok = AutoTokenizer.from_pretrained(MODEL)
+    except Exception as _e:
+        print(f"  Fast tokenizer failed ({_e}), retrying with use_fast=False …")
+        _tok = AutoTokenizer.from_pretrained(MODEL, use_fast=False)
+
     print(f"Loading {MODEL}  (4-bit={USE_4BIT}, batch_size={BATCH_SIZE}) …")
     _pipe = pipeline(
         "text-generation",
         model=MODEL,
+        tokenizer=_tok,
         device_map={"": 0},
         batch_size=BATCH_SIZE,
         model_kwargs=_load_kw,
     )
+    if _pipe.tokenizer.pad_token_id is None:
+        _pipe.tokenizer.pad_token_id = _pipe.model.config.eos_token_id
+    # Tekken tokenizer (Mistral Small 3.1) ships without chat_template — set it manually.
+    if _pipe.tokenizer.chat_template is None:
+        _pipe.tokenizer.chat_template = (
+            "{{ bos_token }}"
+            "{% for message in messages %}"
+            "{% if message['role'] == 'user' %}[INST] {{ message['content'] }} [/INST]"
+            "{% elif message['role'] == 'assistant' %}{{ message['content'] }}{{ eos_token }}"
+            "{% endif %}"
+            "{% endfor %}"
+        )
     print("Model ready.")
     if torch.cuda.is_available():
         for _gi in range(torch.cuda.device_count()):
@@ -331,9 +356,12 @@ def build_prompt(cv_text):
 
 
 def parse_score(reply_text):
-    # Match integers 1-100 (matches 1-9, 10-99, or 100)
-    match = re.search(r"\b([1-9][0-9]?|100)\b", reply_text)
-    return int(match.group(1)) if match else np.nan
+    # Strip thinking blocks before parsing — some models (Fanar-2, Qwen3) wrap
+    # their reasoning in <think>...</think> which contains incidental numbers.
+    clean = re.sub(r"<think>.*?</think>", "", reply_text, flags=re.DOTALL).strip()
+    text = clean if clean else reply_text  # fall back to full text if block unclosed
+    matches = re.findall(r"\b([1-9][0-9]?|100)\b", text)
+    return int(matches[-1]) if matches else np.nan
 
 
 # ### 9c. call_model — single-resume inference via the loaded pipeline
@@ -342,11 +370,10 @@ def parse_score(reply_text):
 
 
 def call_model(prompt):
-    result = _pipe(
-        [{"role": "user", "content": prompt}],
-        max_new_tokens=16,
-        do_sample=False,
-    )
+    msgs = [{"role": "user", "content": prompt}]
+    if NO_THINKING:
+        msgs = [{"role": "system", "content": "/no_think"}] + msgs
+    result = _pipe(msgs, max_new_tokens=512, do_sample=False)
     return result[0]["generated_text"][-1]["content"]
 
 
@@ -425,8 +452,12 @@ def score_all(resumes, indices):
         return np.array(out, dtype=float)
 
     # Pass all prompts at once; pipeline uses BATCH_SIZE internally (set at load time)
-    all_msgs = [[{"role": "user", "content": build_prompt(cv)}] for cv in resumes]
-    all_results = _pipe(all_msgs, max_new_tokens=16, do_sample=False)
+    if NO_THINKING:
+        all_msgs = [[{"role": "system", "content": "/no_think"},
+                     {"role": "user", "content": build_prompt(cv)}] for cv in resumes]
+    else:
+        all_msgs = [[{"role": "user", "content": build_prompt(cv)}] for cv in resumes]
+    all_results = _pipe(all_msgs, max_new_tokens=512, do_sample=False)
     out = []
     for n, (res, cv, i) in enumerate(zip(all_results, resumes, indices)):
         reply = res[0]["generated_text"][-1]["content"]

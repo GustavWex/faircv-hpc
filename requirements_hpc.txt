@@ -8,6 +8,8 @@ torch>=2.3.0
 transformers>=4.51.0     # Gemma 4 (gemma4 model type) requires 4.51+
 accelerate>=0.30.0       # device_map="auto" multi-GPU / CPU offload
 bitsandbytes>=0.43.0     # 4-bit quantisation (USE_4BIT=True)
+tiktoken>=0.7.0          # required by ALLaM tokenizer
+mistral-common>=1.5.4    # required by Mistral Small 3.1 Tekken tokenizer
 
 # Optional: Flash Attention 2 for faster A100 inference
 # pip install flash-attn --no-build-isolation
